@@ -8,13 +8,35 @@ const c = @cImport({
 
 pub const pm4 = @import("amdgpu/pm4.zig");
 
-fn logErr(func: []const u8, code: c_int) void {
-    assert(code != 0);
-    if (code < 0) {
-        std.log.err("{s} returned {s}", .{func, @tagName(@intToEnum(std.c.E, -code))});
-    } else {
-        std.log.err("{s} returned AMDGPU-specific error code {}", .{func, code});
-    }
+/// Taken from AMDPAL/src/core/os/amdgpu/amdgpuDevice.cpp:CheckResult and calls to that function.
+pub const Error = error{
+    InvalidValue,
+    OutOfMemory,
+    OutOfDeviceMemory,
+    Timeout,
+    DeviceLost,
+    PermissionDenied,
+    InitializationFailed,
+    MapFailed,
+    UnmapFailed,
+    Unknown,
+};
+
+fn checkResult(default: Error, code: c_int) Error!void {
+    return switch (code) {
+        0 => {},
+        -@as(c_int, @enumToInt(std.c.E.INVAL)) => error.InvalidValue,
+        -@as(c_int, @enumToInt(std.c.E.NOMEM)) => error.OutOfMemory,
+        -@as(c_int, @enumToInt(std.c.E.NOSPC)) => error.OutOfDeviceMemory,
+        -@as(c_int, @enumToInt(std.c.E.TIME)) => error.Timeout,
+        -@as(c_int, @enumToInt(std.c.E.CANCELED)) => return error.DeviceLost,
+        -@as(c_int, @enumToInt(std.c.E.ACCES)) => return error.PermissionDenied,
+        else => default,
+    };
+}
+
+fn assertResult(code: c_int) void {
+    checkResult(error.Unknown, code) catch unreachable;
 }
 
 pub const Device = struct {
@@ -32,20 +54,12 @@ pub const Device = struct {
         var major: u32 = undefined;
         var minor: u32 = undefined;
         var dev: c.amdgpu_device_handle = undefined;
-        const init_res = c.amdgpu_device_initialize(file.handle, &major, &minor, &dev);
-        if (init_res != 0) {
-            logErr("amdgpu_device_initialize()", init_res);
-            return error.DrmInitFailed;
-        }
-        errdefer _ = c.amdgpu_device_deinitialize(dev);
+        try checkResult(error.InitializationFailed, c.amdgpu_device_initialize(file.handle, &major, &minor, &dev));
+        errdefer assertResult(c.amdgpu_device_deinitialize(dev));
 
         var ctx: c.amdgpu_context_handle = undefined;
-        const ctx_res = c.amdgpu_cs_ctx_create(dev, &ctx);
-        if (ctx_res != 0) {
-            logErr("amdgpu_cs_ctx_create()", init_res);
-            return error.ContextCreationFailed;
-        }
-        errdefer _ = c.amdgpu_cs_ctx_free(ctx);
+        try checkResult(error.InvalidValue, c.amdgpu_cs_ctx_create(dev, &ctx));
+        errdefer assertResult(c.amdgpu_cs_ctx_free(ctx));
 
         return Device{
             .dev = dev,
@@ -54,28 +68,22 @@ pub const Device = struct {
     }
 
     pub fn deinit(self: *Device) void {
-        assert(c.amdgpu_cs_ctx_free(self.ctx) == 0);
-        assert(c.amdgpu_device_deinitialize(self.dev) == 0);
+        assertResult(c.amdgpu_cs_ctx_free(self.ctx));
+        assertResult(c.amdgpu_device_deinitialize(self.dev));
         self.* = undefined;
     }
 
-    pub fn queryInfo(self: Device) !Info {
+    pub fn queryInfo(self: Device) Info {
         var info: Info = undefined;
-        const res = c.amdgpu_query_gpu_info(self.dev, &info);
-        if (res != 0) {
-            logErr("amdgpu_query_gpu_info()", res);
-            return error.QueryFailed;
-        }
+        // Apparently this function will never fail as long as dev is initialized.
+        assertResult(c.amdgpu_query_gpu_info(self.dev, &info));
         return info;
     }
 
-    pub fn queryMemoryInfo(self: Device) !MemoryInfo {
+    pub fn queryMemoryInfo(self: Device) MemoryInfo {
         var info: MemoryInfo = undefined;
-        const res = c.amdgpu_query_info(self.dev, c.AMDGPU_INFO_MEMORY, @sizeOf(MemoryInfo), &info);
-        if (res != 0) {
-            logErr("amdgpu_query_info(AMDGPU_INFO_MEMORY)", res);
-            return error.QueryFailed;
-        }
+        // AMDPAL also asserts this so its likely fine.
+        assertResult(c.amdgpu_query_info(self.dev, c.AMDGPU_INFO_MEMORY, @sizeOf(MemoryInfo), &info));
         return info;
     }
 
@@ -110,16 +118,12 @@ pub const Device = struct {
             },
             .flags = c.AMDGPU_GEM_CREATE_VM_ALWAYS_VALID,
         };
-        const alloc_res = c.amdgpu_bo_alloc(self.dev, &req, &buf.handle);
-        if (alloc_res != 0) {
-            logErr("amdgpu_bo_alloc()", alloc_res);
-            return error.AllocFailed;
-        }
-        errdefer assert(c.amdgpu_bo_free(buf.handle) == 0);
+        try checkResult(error.OutOfDeviceMemory, c.amdgpu_bo_alloc(self.dev, &req, &buf.handle));
+        errdefer assertResult(c.amdgpu_bo_free(buf.handle));
 
         // Technically 32_BIT and RANGE_HIGH can be used both; no idea what that does.
         const flags: u64 = if (info.map_32bit) c.AMDGPU_VA_RANGE_32_BIT else c.AMDGPU_VA_RANGE_HIGH;
-        const range_alloc_res = c.amdgpu_va_range_alloc(
+        try checkResult(error.Unknown, c.amdgpu_va_range_alloc(
             self.dev,
             c.amdgpu_gpu_va_range_general,
             len,
@@ -128,18 +132,10 @@ pub const Device = struct {
             &buf.gpu_address,
             &buf.va_handle,
             flags,
-        );
-        if (range_alloc_res != 0) {
-            logErr("amdgpu_va_range_alloc()", range_alloc_res);
-            return error.DeviceVaAllocFailed;
-        }
-        errdefer assert(c.amdgpu_va_range_free(buf.va_handle) == 0);
+        ));
+        errdefer assertResult(c.amdgpu_va_range_free(buf.va_handle));
 
-        const map_res = c.amdgpu_bo_va_op(buf.handle, 0, len, buf.gpu_address, 0, c.AMDGPU_VA_OP_MAP);
-        if (map_res != 0) {
-            logErr("amdgpu_bo_va_op", map_res);
-            return error.DeviceMapFailed;
-        }
+        try checkResult(error.InvalidValue, c.amdgpu_bo_va_op(buf.handle, 0, len, buf.gpu_address, 0, c.AMDGPU_VA_OP_MAP));
 
         return buf;
     }
@@ -152,8 +148,21 @@ pub const Buffer = struct {
 
     pub fn deinit(self: *Buffer) void {
         // TODO: Does the buffer need to be unmapped before destruction?
-        assert(c.amdgpu_bo_free(self.handle) == 0);
-        assert(c.amdgpu_va_range_free(self.va_handle) == 0);
+        assertResult(c.amdgpu_bo_free(self.handle));
+        assertResult(c.amdgpu_va_range_free(self.va_handle));
         self.* = undefined;
+    }
+
+    pub fn map(self: Buffer) !*anyopaque {
+        var ptr: ?*anyopaque = undefined;
+        const res = c.amdgpu_bo_cpu_map(self.handle, &ptr);
+        if (res != 0) {
+            return error.MapFailed;
+        }
+        return ptr.?;
+    }
+
+    pub fn unmap(self: Buffer) void {
+        assertResult(c.amdgpu_bo_cpu_unmap(self.handle));
     }
 };

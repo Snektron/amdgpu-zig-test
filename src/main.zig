@@ -21,12 +21,12 @@ pub fn main() !void {
     var device = try Device.init(device_path);
     defer device.deinit();
 
-    const info = try device.queryInfo();
+    const info = device.queryInfo();
     std.log.info("device: {s}", .{device.queryName()});
     std.log.info("shader engines: {}", .{info.num_shader_engines});
     std.log.info("constant engine ram size: {}", .{info.ce_ram_size});
 
-    const mem_info = try device.queryMemoryInfo();
+    const mem_info = device.queryMemoryInfo();
     dumpHeapInfo("gtt", mem_info.gtt);
     dumpHeapInfo("vram", mem_info.vram);
     dumpHeapInfo("cpu-accessible vram", mem_info.cpu_accessible_vram);
@@ -39,4 +39,9 @@ pub fn main() !void {
 
     std.log.info("Allocated buf at 0x{X:0>16}", .{buf.gpu_address});
     std.log.info("Allocated buf2 at 0x{X:0>16}", .{buf2.gpu_address});
+
+    const ptr = @ptrCast(*u32, @alignCast(4, try buf.map()));
+    defer buf.unmap();
+
+    std.log.info("Mapped buf to 0x{X:0>16}", .{@ptrToInt(ptr)});
 }
