@@ -1,6 +1,8 @@
 const std = @import("std");
 const amdgpu = @import("amdgpu.zig");
 const Device = amdgpu.Device;
+const Buffer = amdgpu.Buffer;
+const CmdBuffer = amdgpu.CmdBuffer;
 
 fn dumpHeapInfo(name: []const u8, info: Device.HeapInfo) void {
     std.log.info("{s} heap info:", .{name});
@@ -31,17 +33,11 @@ pub fn main() !void {
     dumpHeapInfo("vram", mem_info.vram);
     dumpHeapInfo("cpu-accessible vram", mem_info.cpu_accessible_vram);
 
-    var buf = try device.alloc(0x1000, 0x1000, .{});
-    defer buf.deinit();
-
-    var buf2 = try device.alloc(0x1000, 0x1000, .{});
-    defer buf2.deinit();
-
+    var buf = try Buffer.alloc(device, 0x1000, 0x1000, .{.host_accessible = true});
+    defer buf.free();
     std.log.info("Allocated buf at 0x{X:0>16}", .{buf.gpu_address});
-    std.log.info("Allocated buf2 at 0x{X:0>16}", .{buf2.gpu_address});
 
-    const ptr = @ptrCast(*u32, @alignCast(4, try buf.map()));
-    defer buf.unmap();
-
-    std.log.info("Mapped buf to 0x{X:0>16}", .{@ptrToInt(ptr)});
+    var cmdbuf = try CmdBuffer.alloc(device, 0x4000);
+    errdefer cmdbuf.free();
+    std.log.info("Allocated cmdbuf at 0x{X:0>16} and mapped it to 0x{X:0>16}", .{cmdbuf.buf.gpu_address, @ptrToInt(cmdbuf.cmds.ptr)});
 }

@@ -1,6 +1,19 @@
-// Constants are taken from core/hw/gfxip/gfx6/chip/si_ci_vi_merged_pm4_it_opcodes.h
+pub const ShaderType = enum(u1) {
+    graphics = 0,
+    compute = 1,
+};
 
-const Opcode = enum(u8) {
+pub fn makePkt3Header(
+    predicate: bool,
+    shader_type: ShaderType,
+    opcode: Opcode,
+    count_minus_one: u14,
+) u32 {
+    return (0x3 << 30) | (count_minus_one << 16) | (@enumToInt(opcode) << 8) | (@enumToInt(shader_type) << 1) | @boolToInt(predicate);
+}
+
+/// Constants are taken from core/hw/gfxip/gfx6/chip/si_ci_vi_merged_pm4_it_opcodes.h
+pub const Opcode = enum(u8) {
     nop                               = 0x10,
     set_base                          = 0x11,
     clear_state                       = 0x12,
