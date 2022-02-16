@@ -33,11 +33,50 @@ pub fn main() !void {
     dumpHeapInfo("vram", mem_info.vram);
     dumpHeapInfo("cpu-accessible vram", mem_info.cpu_accessible_vram);
 
-    var buf = try Buffer.alloc(device, 0x1000, 0x1000, .{.host_accessible = true});
-    defer buf.free();
-    std.log.info("Allocated buf at 0x{X:0>16}", .{buf.gpu_address});
+    var output = try Buffer.alloc(device, 0x1000, 0x1000, .{.host_accessible = true});
+    defer output.free();
+    std.log.info("Allocated output at 0x{X:0>16}", .{output.device_address});
+
+    var shader = blk: {
+        var shader = try Buffer.alloc(device, 0x1000, 0x1000, .{.host_accessible = true});
+        errdefer shader.free();
+        const shader_code = [_]u32{
+            0xC0420080, // s_store_dword s2, s[0:1], 0x0
+            0x00000000,
+            0xBF810000, // s_endpgm
+        };
+        var shader_ptr = @ptrCast([*]u32, @alignCast(@alignOf(u32), try shader.map()));
+        defer shader.unmap();
+
+        std.mem.copy(u32, shader_ptr[0..shader_code.len], &shader_code);
+
+        break :blk shader;
+    };
+    defer shader.free();
+    std.log.info("Allocated & Uploaded test shader", .{});
 
     var cmdbuf = try CmdBuffer.alloc(device, 0x4000);
     errdefer cmdbuf.free();
-    std.log.info("Allocated cmdbuf at 0x{X:0>16} and mapped it to 0x{X:0>16}", .{cmdbuf.buf.gpu_address, @ptrToInt(cmdbuf.cmds.ptr)});
+    std.log.info("Allocated cmdbuf at 0x{X:0>16} and mapped it to 0x{X:0>16}", .{cmdbuf.buf.device_address, @ptrToInt(cmdbuf.cmds.ptr)});
+
+    try cmdbuf.cmdDispatchCompute(.{
+        .shader = shader,
+        .workgroup_dim = .{ .x = 1, .y = 1, .z = 1 },
+        .dim = .{ .x = 1, .y = 1, .z = 1 },
+        .sgprs = 3,
+        .vgprs = 0,
+        .user_sgprs = &[_]u32{
+            @truncate(u32, output.device_address),
+            @truncate(u32, output.device_address >> 32),
+            123,
+        },
+    });
+
+    std.log.info("Submitting cmdbuf... ({} words)", .{ cmdbuf.offset });
+    try device.submit(cmdbuf);
+
+    const output_ptr = @ptrCast([*]u32, @alignCast(@alignOf(u32), try output.map()));
+    defer output.unmap();
+
+    std.log.info("Result: {}", .{output_ptr[0]});
 }

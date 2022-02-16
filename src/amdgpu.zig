@@ -93,6 +93,44 @@ pub const Device = struct {
         }
         return @as([:0]const u8, "Unknown GPU").ptr;
     }
+
+    pub fn submit(self: Device, cmdbuf: CmdBuffer) !void {
+        var ib = c.amdgpu_cs_ib_info{
+            .flags = 0,
+            .ib_mc_address = cmdbuf.buf.device_address,
+            .size = @intCast(u32, cmdbuf.offset),
+        };
+        var req = c.amdgpu_cs_request{
+            .flags = 0,
+            .ip_type = c.AMDGPU_HW_IP_COMPUTE,
+            .ip_instance = 0,
+            .ring = 0,
+            .resources = null,
+            .number_of_dependencies = 0,
+            .dependencies = null,
+            .number_of_ibs = 1,
+            .ibs = &ib,
+            .seq_no = undefined, // Will be set by call to amdgpu_cs_submit.
+            .fence_info = std.mem.zeroes(c.amdgpu_cs_fence_info),
+        };
+        try checkResult(error.InvalidValue, c.amdgpu_cs_submit(self.ctx, 0, &req, 1));
+
+        // TODO: Extract this somewhere else.
+        var fence = c.amdgpu_cs_fence{
+            .context = self.ctx,
+            .ip_type = c.AMDGPU_HW_IP_COMPUTE,
+            .ip_instance = 0,
+            .ring = 0,
+            .fence = req.seq_no,
+        };
+        var status: u32 = undefined;
+        var first: u32 = undefined;
+        try checkResult(error.InvalidValue , c.amdgpu_cs_wait_fences(&fence, 1, true, 10 * std.time.ns_per_s, &status, &first));
+
+        if (status != 1) {
+            return error.Timeout;
+        }
+    }
 };
 
 pub const Buffer = struct {
@@ -117,7 +155,7 @@ pub const Buffer = struct {
 
     handle: c.amdgpu_bo_handle,
     va_handle: c.amdgpu_va_handle,
-    gpu_address: u64,
+    device_address: u64,
 
     pub fn alloc(dev: Device, len: u64, alignment: u64, info: AllocInfo) !Buffer {
         var self: Buffer = undefined;
@@ -147,13 +185,13 @@ pub const Buffer = struct {
             len,
             alignment,
             0,
-            &self.gpu_address,
+            &self.device_address,
             &self.va_handle,
             map_flags,
         ));
         errdefer assertResult(c.amdgpu_va_range_free(self.va_handle));
 
-        try checkResult(error.InvalidValue, c.amdgpu_bo_va_op(self.handle, 0, len, self.gpu_address, 0, c.AMDGPU_VA_OP_MAP));
+        try checkResult(error.InvalidValue, c.amdgpu_bo_va_op(self.handle, 0, len, self.device_address, 0, c.AMDGPU_VA_OP_MAP));
 
         return self;
     }
@@ -177,6 +215,12 @@ pub const Buffer = struct {
     pub fn unmap(self: Buffer) void {
         assertResult(c.amdgpu_bo_cpu_unmap(self.handle));
     }
+};
+
+pub const Dim3 = struct {
+    x: u32,
+    y: u32,
+    z: u32,
 };
 
 pub const CmdBuffer = struct {
@@ -214,16 +258,117 @@ pub const CmdBuffer = struct {
         self.* = undefined;
     }
 
-    /// Emit a type-3 packet into the command buffer.
-    fn cmdPkt3(self: *CmdBuffer, opcode: pm4.Opcode, opts: Pkt3Options, data: []const u32) !void {
-        const header = pm4.makePkt3Header(opts.predicate, opts.shader_type, opcode, @intCast(u14, data.len - 1));
-        const total_words = data.len + 1; // 1 for header.
+    /// Reset the command buffer and prepare it for recording new commands.
+    pub fn reset(self: *CmdBuffer) void {
+        self.offset = 0;
+    }
+
+    /// Emit a type-2 packet into the command buffer. According to the docs, this does nothing,
+    /// and can be used to pad the buffer.
+    pub fn cmdPkt2(self: *CmdBuffer) !void {
+        if (self.offset + 1 > self.cmds.len) {
+            return error.CmdBufferFull;
+        }
+
+        self.cmds[self.offset] = pm4.pkt2_header;
+        self.offset += 1;
+    }
+
+    /// Emit a type-3 packet header, and set the number of data bytes that may follow.
+    pub fn cmdPkt3Raw(self: *CmdBuffer, opcode: pm4.Opcode, opts: Pkt3Options, data_len: usize) !void {
+        const header = pm4.Pkt3Header{
+            .predicate = opts.predicate,
+            .shader_type = opts.shader_type,
+            .opcode = opcode,
+            .count_minus_one = @intCast(u14, data_len - 1),
+        };
+        const total_words = data_len + 1; // 1 for header.
         if (self.offset + total_words > self.cmds.len) {
             return error.CmdBufferFull;
         }
 
-        self.cmds[self.offset] = header;
-        std.mem.copy(u32, self.cmds[self.offset + 1..], data);
-        self.offset += total_words;
+        self.cmds[self.offset] = header.encode();
+        self.offset += 1;
+    }
+
+    /// Emit a type-3 packet into the command buffer.
+    pub fn cmdPkt3(self: *CmdBuffer, opcode: pm4.Opcode, opts: Pkt3Options, data: []const u32) !void {
+        try self.cmdPkt3Raw(opcode, opts, data.len);
+        std.mem.copy(u32, self.cmds[self.offset..], data);
+        self.offset += data.len;
+    }
+
+    pub fn cmdNop(self: *CmdBuffer) !void {
+        try self.cmdPkt2();
+    }
+
+    pub fn cmdSetShReg(self: *CmdBuffer, reg: pm4.Register, value: u32) !void {
+        try self.cmdSetShRegs(reg, &[_]u32{value});
+    }
+
+    pub fn cmdSetShRegs(self: *CmdBuffer, start_reg: pm4.Register, values: []const u32) !void {
+        try self.cmdPkt3Raw(.set_sh_reg, .{}, values.len + 1);
+        self.cmds[self.offset] = (@enumToInt(start_reg) - 0xB000) / @sizeOf(u32);
+        std.mem.copy(u32, self.cmds[self.offset + 1..], values);
+        self.offset += 1 + values.len;
+    }
+
+    pub const ComputeDispatchInfo = struct {
+        shader: Buffer,
+        workgroup_dim: Dim3,
+        dim: Dim3,
+        /// Total number of SGPRS that the shader uses.
+        sgprs: u32,
+        /// Total number of VGPRS that the shader uses.
+        vgprs: u32,
+        user_sgprs: []const u32 = &.{},
+    };
+
+    pub fn cmdDispatchCompute(self: *CmdBuffer, info: ComputeDispatchInfo) !void {
+        std.debug.assert(info.user_sgprs.len <= 16);
+
+        // No idea what this actually is. Some mask to enable compute units/lanes?
+        try self.cmdSetShRegs(.compute_static_thread_mgmt_se0, &[_]u32{
+            0xFFFF_FFFF,
+            0xFFFF_FFFF,
+            0xFFFF_FFFF,
+            0xFFFF_FFFF,
+        });
+
+        try self.cmdSetShRegs(.compute_pgm_lo, &[_]u32{
+            @truncate(u32, info.shader.device_address >> 8), // Note, apparently shaders must be aligned to 256 byte
+            @truncate(u32, info.shader.device_address >> 40),
+        });
+
+        const rsrc1 = pm4.ComputePgmRsrc1{
+            .vgprs_times_4 = @intCast(u6, std.math.divCeil(u32, info.vgprs, 4) catch unreachable),
+            .sgprs_times_8 = @intCast(u4, std.math.divCeil(u32, info.sgprs, 8) catch unreachable),
+        };
+        const rsrc2 = pm4.ComputePgmRsrc2{
+            .user_sgprs = @intCast(u5, info.user_sgprs.len),
+        };
+        try self.cmdSetShRegs(.compute_pgm_rsrc1, &[_]u32{
+            rsrc1.encode(),
+            rsrc2.encode(),
+        });
+
+        try self.cmdSetShRegs(.compute_num_thread_x, &[_]u32{
+            info.workgroup_dim.x,
+            info.workgroup_dim.y,
+            info.workgroup_dim.z,
+        });
+
+        try self.cmdSetShRegs(.compute_user_data_0, info.user_sgprs);
+
+        const initiator = pm4.ComputeDispatchInitiator{
+            .compute_shader_en = true,
+            .force_start_at_000 = true,
+        };
+        try self.cmdPkt3(.dispatch_direct, .{.shader_type = .compute}, &[_]u32{
+            info.dim.x,
+            info.dim.y,
+            info.dim.z,
+            initiator.encode(),
+        });
     }
 };

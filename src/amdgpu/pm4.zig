@@ -3,14 +3,80 @@ pub const ShaderType = enum(u1) {
     compute = 1,
 };
 
-pub fn makePkt3Header(
+pub const pkt2_header = 0x2 << 30;
+
+pub const Pkt3Header = struct {
     predicate: bool,
     shader_type: ShaderType,
     opcode: Opcode,
     count_minus_one: u14,
-) u32 {
-    return (0x3 << 30) | (count_minus_one << 16) | (@enumToInt(opcode) << 8) | (@enumToInt(shader_type) << 1) | @boolToInt(predicate);
-}
+
+    pub fn encode(self: Pkt3Header) u32 {
+        var bits: u32 = 0x3 << 30;
+        bits |= @as(u32, self.count_minus_one) << 16;
+        bits |= @as(u32, @enumToInt(self.opcode)) << 8;
+        bits |= @as(u32, @enumToInt(self.shader_type)) << 1;
+        bits |= @as(u32, @boolToInt(self.predicate));
+        return bits;
+    }
+};
+
+/// Registers. Values are byte offsets.
+pub const Register = enum(u16) {
+    compute_dispatch_initiator = 0xB800,
+    compute_num_thread_x = 0xB81C,
+    compute_num_thread_y = 0xB820,
+    compute_num_thread_z = 0xB824,
+    compute_pgm_lo = 0xB830,
+    compute_pgm_hi = 0xB834,
+    compute_pgm_rsrc1 = 0xB848,
+    compute_pgm_rsrc2 = 0xB84c,
+    compute_static_thread_mgmt_se0 = 0xB858,
+    compute_static_thread_mgmt_se1 = 0xB85c,
+    compute_static_thread_mgmt_se2 = 0xB864,
+    compute_static_thread_mgmt_se3 = 0xB868,
+    compute_user_data_0 = 0xB900,
+    _,
+};
+
+pub const ComputeDispatchInitiator = struct {
+    compute_shader_en: bool = false,
+    force_start_at_000: bool = false,
+    // TODO: Other fields.
+
+    pub fn encode(self: ComputeDispatchInitiator) u32 {
+        var bits: u32 = 0;
+        bits |= @as(u32, @boolToInt(self.compute_shader_en));
+        bits |= @as(u32, @boolToInt(self.force_start_at_000)) << 2;
+        return bits;
+    }
+};
+
+pub const ComputePgmRsrc1 = struct {
+    vgprs_times_4: u6 = 0,
+    sgprs_times_8: u4 = 0,
+    // TODO: Other fields.
+
+    pub fn encode(self: ComputePgmRsrc1) u32 {
+        var bits: u32 = 0;
+        bits |= @as(u32, self.vgprs_times_4);
+        bits |= @as(u32, self.sgprs_times_8) << 6;
+        return bits;
+    }
+};
+
+pub const ComputePgmRsrc2 = struct {
+    scratch_en: bool = false,
+    user_sgprs: u5 = 0, // max 16
+    // TODO: Other fields.
+
+    pub fn encode(self: ComputePgmRsrc2) u32 {
+        var bits: u32 = 0;
+        bits |= @as(u32, @boolToInt(self.scratch_en));
+        bits |= @as(u32, self.user_sgprs) << 1;
+        return bits;
+    }
+};
 
 /// Constants are taken from core/hw/gfxip/gfx6/chip/si_ci_vi_merged_pm4_it_opcodes.h
 pub const Opcode = enum(u8) {
@@ -46,7 +112,7 @@ pub const Opcode = enum(u8) {
     copy_dw_si_ci                     = 0x3B,
     wait_reg_mem                      = 0x3C,
     indirect_buffer                   = 0x3F,
-    cond_indirect_buffer              = 0x3F,
+    // cond_indirect_buffer              = 0x3F,
     copy_data                         = 0x40,
     cp_dma                            = 0x41,
     pfp_sync_me                       = 0x42,
