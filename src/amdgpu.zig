@@ -2,8 +2,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const c = @cImport({
-    @cInclude("amdgpu.h");
-    @cInclude("amdgpu_drm.h");
+    @cInclude("libdrm/amdgpu.h");
+    @cInclude("libdrm/amdgpu_drm.h");
 });
 
 pub const pm4 = @import("amdgpu/pm4.zig");
