@@ -33,19 +33,19 @@ pub fn main() !void {
     dumpHeapInfo("vram", mem_info.vram);
     dumpHeapInfo("cpu-accessible vram", mem_info.cpu_accessible_vram);
 
-    var output = try Buffer.alloc(device, 0x1000, 0x1000, .{.host_accessible = true});
+    var output = try Buffer.alloc(device, 0x1000, 0x1000, .{ .host_accessible = true });
     defer output.free();
     std.log.info("Allocated output at 0x{X:0>16}", .{output.device_address});
 
     var shader = blk: {
-        var shader = try Buffer.alloc(device, 0x1000, 0x1000, .{.host_accessible = true});
+        var shader = try Buffer.alloc(device, 0x1000, 0x1000, .{ .host_accessible = true });
         errdefer shader.free();
         const shader_code = [_]u32{
             0xC0420080, // s_store_dword s2, s[0:1], 0x0
             0x00000000,
             0xBF810000, // s_endpgm
         };
-        var shader_ptr = @ptrCast([*]u32, @alignCast(@alignOf(u32), try shader.map()));
+        var shader_ptr: [*]u32 = @ptrCast(@alignCast(try shader.map()));
         defer shader.unmap();
 
         std.mem.copy(u32, shader_ptr[0..shader_code.len], &shader_code);
@@ -57,7 +57,7 @@ pub fn main() !void {
 
     var cmdbuf = try CmdBuffer.alloc(device, 0x4000);
     errdefer cmdbuf.free();
-    std.log.info("Allocated cmdbuf at 0x{X:0>16} and mapped it to 0x{X:0>16}", .{cmdbuf.buf.device_address, @ptrToInt(cmdbuf.cmds.ptr)});
+    std.log.info("Allocated cmdbuf at 0x{X:0>16} and mapped it to 0x{X:0>16}", .{ cmdbuf.buf.device_address, @intFromPtr(cmdbuf.cmds.ptr) });
 
     try cmdbuf.cmdDispatchCompute(.{
         .shader = shader,
@@ -66,16 +66,16 @@ pub fn main() !void {
         .sgprs = 3,
         .vgprs = 0,
         .user_sgprs = &[_]u32{
-            @truncate(u32, output.device_address),
-            @truncate(u32, output.device_address >> 32),
+            @as(u32, @truncate(output.device_address)),
+            @as(u32, @truncate(output.device_address >> 32)),
             123,
         },
     });
 
-    std.log.info("Submitting cmdbuf... ({} words)", .{ cmdbuf.offset });
+    std.log.info("Submitting cmdbuf... ({} words)", .{cmdbuf.offset});
     try device.submit(cmdbuf);
 
-    const output_ptr = @ptrCast([*]u32, @alignCast(@alignOf(u32), try output.map()));
+    const output_ptr = @as([*]u32, @ptrCast(@alignCast(try output.map())));
     defer output.unmap();
 
     std.log.info("Result: {}", .{output_ptr[0]});

@@ -25,12 +25,12 @@ pub const Error = error{
 fn checkResult(default: Error, code: c_int) Error!void {
     return switch (code) {
         0 => {},
-        -@as(c_int, @enumToInt(std.c.E.INVAL)) => error.InvalidValue,
-        -@as(c_int, @enumToInt(std.c.E.NOMEM)) => error.OutOfMemory,
-        -@as(c_int, @enumToInt(std.c.E.NOSPC)) => error.OutOfDeviceMemory,
-        -@as(c_int, @enumToInt(std.c.E.TIME)) => error.Timeout,
-        -@as(c_int, @enumToInt(std.c.E.CANCELED)) => return error.DeviceLost,
-        -@as(c_int, @enumToInt(std.c.E.ACCES)) => return error.PermissionDenied,
+        -@as(c_int, @intFromEnum(std.c.E.INVAL)) => error.InvalidValue,
+        -@as(c_int, @intFromEnum(std.c.E.NOMEM)) => error.OutOfMemory,
+        -@as(c_int, @intFromEnum(std.c.E.NOSPC)) => error.OutOfDeviceMemory,
+        -@as(c_int, @intFromEnum(std.c.E.TIME)) => error.Timeout,
+        -@as(c_int, @intFromEnum(std.c.E.CANCELED)) => return error.DeviceLost,
+        -@as(c_int, @intFromEnum(std.c.E.ACCES)) => return error.PermissionDenied,
         else => default,
     };
 }
@@ -48,7 +48,7 @@ pub const Device = struct {
     ctx: c.amdgpu_context_handle,
 
     pub fn init(device_path: []const u8) !Device {
-        const file = try std.fs.cwd().openFile(device_path, .{.mode = .read_write});
+        const file = try std.fs.cwd().openFile(device_path, .{ .mode = .read_write });
         defer file.close();
 
         var major: u32 = undefined;
@@ -98,7 +98,7 @@ pub const Device = struct {
         var ib = c.amdgpu_cs_ib_info{
             .flags = 0,
             .ib_mc_address = cmdbuf.buf.device_address,
-            .size = @intCast(u32, cmdbuf.offset),
+            .size = @as(u32, @intCast(cmdbuf.offset)),
         };
         var req = c.amdgpu_cs_request{
             .flags = 0,
@@ -125,7 +125,7 @@ pub const Device = struct {
         };
         var status: u32 = undefined;
         var first: u32 = undefined;
-        try checkResult(error.InvalidValue , c.amdgpu_cs_wait_fences(&fence, 1, true, 10 * std.time.ns_per_s, &status, &first));
+        try checkResult(error.InvalidValue, c.amdgpu_cs_wait_fences(&fence, 1, true, 10 * std.time.ns_per_s, &status, &first));
 
         if (status != 1) {
             return error.Timeout;
@@ -239,16 +239,16 @@ pub const CmdBuffer = struct {
     /// Initialize a command buffer, with enough space for at least `words` words of command data.
     /// `words` is rounded up to a multiple of 0x1000 / word_size.
     pub fn alloc(dev: Device, words: u64) !CmdBuffer {
-        const size = std.mem.alignForwardGeneric(u64, words * @sizeOf(u32), 0x1000);
-        var buf = try Buffer.alloc(dev, size, cmd_buffer_alignment, .{.host_accessible = true});
+        const size = std.mem.alignForward(u64, words * @sizeOf(u32), 0x1000);
+        var buf = try Buffer.alloc(dev, size, cmd_buffer_alignment, .{ .host_accessible = true });
         errdefer buf.free();
 
-        const ptr = @ptrCast([*]u32, @alignCast(@alignOf(u32), try buf.map()));
+        const ptr: [*]u32 = @ptrCast(@alignCast(try buf.map()));
         errdefer buf.unmap();
 
         return CmdBuffer{
             .buf = buf,
-            .cmds = ptr[0..size / @sizeOf(u32)],
+            .cmds = ptr[0 .. size / @sizeOf(u32)],
         };
     }
 
@@ -280,7 +280,7 @@ pub const CmdBuffer = struct {
             .predicate = opts.predicate,
             .shader_type = opts.shader_type,
             .opcode = opcode,
-            .count_minus_one = @intCast(u14, data_len - 1),
+            .count_minus_one = @as(u14, @intCast(data_len - 1)),
         };
         const total_words = data_len + 1; // 1 for header.
         if (self.offset + total_words > self.cmds.len) {
@@ -308,8 +308,8 @@ pub const CmdBuffer = struct {
 
     pub fn cmdSetShRegs(self: *CmdBuffer, start_reg: pm4.Register, values: []const u32) !void {
         try self.cmdPkt3Raw(.set_sh_reg, .{}, values.len + 1);
-        self.cmds[self.offset] = (@enumToInt(start_reg) - 0xB000) / @sizeOf(u32);
-        std.mem.copy(u32, self.cmds[self.offset + 1..], values);
+        self.cmds[self.offset] = (@intFromEnum(start_reg) - 0xB000) / @sizeOf(u32);
+        std.mem.copy(u32, self.cmds[self.offset + 1 ..], values);
         self.offset += 1 + values.len;
     }
 
@@ -336,16 +336,16 @@ pub const CmdBuffer = struct {
         });
 
         try self.cmdSetShRegs(.compute_pgm_lo, &[_]u32{
-            @truncate(u32, info.shader.device_address >> 8), // Note, apparently shaders must be aligned to 256 byte
-            @truncate(u32, info.shader.device_address >> 40),
+            @as(u32, @truncate(info.shader.device_address >> 8)), // Note, apparently shaders must be aligned to 256 byte
+            @as(u32, @truncate(info.shader.device_address >> 40)),
         });
 
         const rsrc1 = pm4.ComputePgmRsrc1{
-            .vgprs_times_4 = @intCast(u6, std.math.divCeil(u32, info.vgprs, 4) catch unreachable),
-            .sgprs_times_8 = @intCast(u4, std.math.divCeil(u32, info.sgprs, 8) catch unreachable),
+            .vgprs_times_4 = @as(u6, @intCast(std.math.divCeil(u32, info.vgprs, 4) catch unreachable)),
+            .sgprs_times_8 = @as(u4, @intCast(std.math.divCeil(u32, info.sgprs, 8) catch unreachable)),
         };
         const rsrc2 = pm4.ComputePgmRsrc2{
-            .user_sgprs = @intCast(u5, info.user_sgprs.len),
+            .user_sgprs = @as(u5, @intCast(info.user_sgprs.len)),
         };
         try self.cmdSetShRegs(.compute_pgm_rsrc1, &[_]u32{
             rsrc1.encode(),
@@ -364,7 +364,7 @@ pub const CmdBuffer = struct {
             .compute_shader_en = true,
             .force_start_at_000 = true,
         };
-        try self.cmdPkt3(.dispatch_direct, .{.shader_type = .compute}, &[_]u32{
+        try self.cmdPkt3(.dispatch_direct, .{ .shader_type = .compute }, &[_]u32{
             info.dim.x,
             info.dim.y,
             info.dim.z,
